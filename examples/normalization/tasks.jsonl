@@ -1,0 +1,7 @@
+{"id":"train-001","split":"train","input":"  HELLO  ","expected":"hello"}
+{"id":"train-002","split":"train","input":"Skill Learning","expected":"skill learning"}
+{"id":"train-003","split":"train","input":"  AGENT LOOP","expected":"agent loop"}
+{"id":"validation-001","split":"validation","input":"  VALIDATE Me ","expected":"validate me"}
+{"id":"validation-002","split":"validation","input":"Candidate SKILL","expected":"candidate skill"}
+{"id":"test-001","split":"test","input":"  FINAL Test  ","expected":"final test"}
+{"id":"test-002","split":"test","input":"Unseen INPUT","expected":"unseen input"}
