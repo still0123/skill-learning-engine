@@ -1,38 +1,52 @@
-# Skill Learning Engine
+# Skill Learning Engine（Skill 自学习引擎）
 
-一个基于执行经验持续改进 Skill，并用可复现实验验证改动收益的离线学习系统。
+[![测试状态](https://github.com/still0123/skill-learning-engine/actions/workflows/tests.yml/badge.svg)](https://github.com/still0123/skill-learning-engine/actions/workflows/tests.yml)
 
-它让 Agent 在不训练模型参数的情况下，完成“执行任务 → 保存轨迹 → 提炼知识 →
-生成候选 Skill → 独立评测 → 安全发布”的闭环。项目受
-[WikiSkill](https://arxiv.org/abs/2608.27454) 启发，是独立的非官方工程实现；
-模型调用和工具循环复用我实现的
-[AgentLoop](https://github.com/still0123/agentloop)，演化控制层在本仓库实现。
+一个根据任务执行经验持续改进 Skill，并用独立评测验证改动收益的离线学习系统。
 
-## 为什么做这个项目
+它不训练模型参数，而是把 Agent 的成功与失败轨迹沉淀为可复用知识，再生成候选 Skill，
+通过验证集门禁后才允许发布。整个过程形成如下闭环：
 
-普通 Skill 往往依赖人工阅读失败日志、总结经验并修改说明文件，经验既难复用，修改也
-缺少效果验证。Skill Learning Engine 将这条流程拆成可追溯、可评测的三个层次：
+```text
+执行任务 → 保存轨迹 → 提炼知识 → 生成候选 Skill → 独立验证 → 接受或拒绝
+```
 
-- Raw：保留每次任务执行的不可变轨迹，回答“发生了什么”。
-- Wiki：从成功和失败样本中沉淀可复用 Pattern，回答“学到了什么”。
-- Skills：只接收通过验证门禁的修改，回答“哪些经验可以正式生效”。
+项目受 [WikiSkill](https://arxiv.org/abs/2608.27454) 启发，但不是论文的官方实现，也不宣称
+复现论文中的全部实验结果。模型调用、工具循环和结构化提交复用我实现的
+[AgentLoop](https://github.com/still0123/agentloop)，本仓库负责经验学习、Skill 演化、版本门禁
+和可复现实验。
 
-## 核心闭环
+## 为什么需要它
+
+传统 Skill 通常由开发者手工维护：发现失败、阅读日志、总结经验、修改说明文件。这样做有
+三个明显问题：
+
+- 执行经验散落在日志里，后续任务无法直接复用。
+- Skill 修改依赖个人判断，难以解释为什么这样改。
+- 修改后缺少独立评测，无法确认是真正提升还是偶然波动。
+
+Skill Learning Engine 将这些工作拆成三个相互隔离的层次：
+
+- 原始轨迹（Raw）：保存每次执行的不可变证据，回答“发生了什么”。
+- 知识库（Wiki）：从成功与失败样本中提炼通用模式，回答“学到了什么”。
+- 正式 Skill（Skills）：只接收通过验证门禁的修改，回答“哪些经验可以正式生效”。
+
+## 工作原理
 
 ```mermaid
 flowchart LR
-    TASK["Train 任务"] --> EXEC["Task Executor<br/>执行当前 Skill"]
-    EXEC --> RAW["Raw Trace<br/>不可变证据"]
-    RAW --> MAINTAIN["Knowledge Maintainer<br/>归纳成功与失败模式"]
-    MAINTAIN --> WIKI["Persistent Wiki<br/>Pattern 与证据索引"]
-    WIKI --> PROPOSE["Skill Proposer<br/>单个原子修改"]
-    ACTIVE["Active Skill"] --> PROPOSE
-    PROPOSE --> CANDIDATE["Candidate Skill<br/>隔离目录"]
-    CANDIDATE --> VALIDATE["Validation 评测"]
-    VALIDATE --> GATE{"分数严格提升?"}
-    GATE -->|是| PROMOTE["快照旧版本并发布"]
-    GATE -->|否| REJECT["拒绝候选<br/>正式 Skill 不变"]
-    PROMOTE --> IMPACT["Skill Impact Log"]
+    TASK["训练任务"] --> EXEC["任务执行器<br/>使用当前 Skill 执行"]
+    EXEC --> RAW["原始轨迹<br/>保存输入、输出与过程"]
+    RAW --> MAINTAIN["知识维护者<br/>归纳成功与失败模式"]
+    MAINTAIN --> WIKI["持久知识库<br/>模式与证据索引"]
+    WIKI --> PROPOSE["Skill 提案器<br/>生成一次原子修改"]
+    ACTIVE["当前正式 Skill"] --> PROPOSE
+    PROPOSE --> CANDIDATE["候选 Skill<br/>在隔离目录中构建"]
+    CANDIDATE --> VALIDATE["验证集评测"]
+    VALIDATE --> GATE{"分数是否严格提升？"}
+    GATE -->|是| PROMOTE["保存旧版本并发布候选"]
+    GATE -->|否| REJECT["拒绝候选<br/>正式版本保持不变"]
+    PROMOTE --> IMPACT["Skill 影响记录"]
     REJECT --> IMPACT
 
     classDef evidence fill:#E3F2FD,stroke:#1976D2,color:#0D47A1
@@ -45,48 +59,56 @@ flowchart LR
     class VALIDATE,GATE,REJECT,IMPACT gate
 ```
 
-AgentLoop 只运行三个需要模型判断的角色：Task Executor、Knowledge Maintainer 和
-Skill Proposer。候选隔离、分数计算、版本晋级和失败回滚均由确定性 Python 代码控制，
-LLM 不能直接修改正式 Skill，也不能自行决定发布结果。
+其中只有三个环节需要大模型参与：
 
-V2 在闭环之上增加了实验层：每次运行固化数据、Skill、Prompt、代码和模型配置，
-在演化结束后统一比较 No Skill、Seed Skill、Evolved Skill，并通过成对 Bootstrap
-报告置信区间、通过 sign-flip randomization test 计算 p 值。这样可以区分“模型本身会做”、
-“人工初始 Skill 有效”和“自演化带来增量”。
+- 任务执行器：根据任务和当前 Skill 生成答案。
+- 知识维护者：从训练轨迹中提炼可复用的成功策略和失败模式。
+- Skill 提案器：根据知识与证据生成一次可审查的文本修改。
 
-## 关键设计
+候选隔离、评分计算、版本晋级和拒绝回滚均由确定性 Python 代码控制。大模型不能直接修改
+正式 Skill，也不能自行决定候选是否发布。
 
-| 机制 | 实现方式 | 作用 |
+## 核心设计
+
+| 机制 | 实现方式 | 解决的问题 |
 |---|---|---|
-| 最小权限运行时 | 每个角色只获得 `read_file`、`glob`、`submit_result` | 限制模型副作用 |
-| 严格结构化输出 | 必须调用一次 `submit_result`，并通过严格 Schema 校验 | 防止自然语言结果污染流程 |
-| 原子 Skill 提案 | 每轮只允许一次精确文本替换，原文必须唯一命中 | 让变化可解释、可审查 |
-| 独立验证门禁 | Candidate 分数必须严格高于当前最佳 Validation 分数 | 避免无收益修改上线 |
-| 版本快照与回滚 | 发布前保存 Active Skill，拒绝或异常时不修改正式版本 | 保持稳定版本可恢复 |
-| Test 隔离 | Test 集只在所有演化结束后运行 | 避免测试集参与版本选择 |
-| 三条件基线 | No Skill、Seed Skill、Evolved Skill 使用相同 Test task ID | 拆分初始 Skill 和自演化收益 |
-| 可复现实验 | 固化输入哈希、commit、模型配置并独立重复运行 | 让结果可以追溯和复核 |
-| 成对统计 | 按 task ID 计算改善/回退、Bootstrap CI 和 sign-flip p-value | 避免只看一次平均分 |
+| 最小权限运行时 | 按角色分配 `read_file`、`glob`、`submit_result` | 限制模型可见信息和副作用 |
+| 严格结构化输出 | 必须调用一次 `submit_result` 并通过 Schema 校验 | 防止自然语言输出污染流程 |
+| 原子修改 | 每轮只允许一次精确文本替换，原文必须唯一命中 | 让 Skill 变化可解释、可审查 |
+| 成对验证门禁 | 候选与当前最佳版本在同一组 Validation task ID 上比较 | 避免任务错位和无收益修改 |
+| 版本快照 | 发布前保存正式 Skill，拒绝或异常时保持原版本 | 便于审计和恢复 |
+| Test 隔离 | 所有演化结束后才访问 Test | 防止测试集参与版本选择 |
+| 三条件对照 | 比较无 Skill、初始 Skill、演化后 Skill | 拆分模型能力、人工 Skill 收益和演化增量 |
+| 可复现实验 | 快照数据、Prompt、Skill，并记录 Git 状态和模型可见配置 | 让实验结果可以追溯和复核 |
+| 成对统计 | Bootstrap 置信区间与 sign-flip p 值 | 避免只看一次平均分 |
 
-完整约束见 [V1 Spec](docs/spec.md) 和 [V2 Spec](docs/spec-v2.md)。
+更完整的约束与验收标准见 [V1 设计文档](docs/spec.md) 和
+[V2 设计文档](docs/spec-v2.md)。
 
-## V2 实验协议
+## 实验如何避免“看起来有效”
+
+每次正式实验会创建多个相互独立的工作区。演化阶段只使用 Train 和 Validation；全部迭代
+结束后，才在相同的 Test 任务上依次评测三种条件：
+
+1. `no_skill`：不向执行模型提供 Skill 名称、版本或内容。
+2. `seed_skill`：使用实验开始时的人工初始 Skill。
+3. `evolved_skill`：使用最终通过验证门禁的 Skill。
 
 ```mermaid
 flowchart LR
-    SNAPSHOT["Manifest<br/>数据 / Skill / Prompt / Commit 哈希"] --> R1["Repeat 1<br/>独立 Workspace"]
-    SNAPSHOT --> R2["Repeat 2<br/>独立 Workspace"]
-    SNAPSHOT --> R3["Repeat 3<br/>独立 Workspace"]
-    R1 --> TEST["演化结束后才访问 Test"]
+    SNAPSHOT["实验清单<br/>数据、Skill、Prompt、Git 状态与模型配置"] --> R1["第 1 次独立演化"]
+    SNAPSHOT --> R2["第 2 次独立演化"]
+    SNAPSHOT --> R3["第 3 次独立演化"]
+    R1 --> TEST["演化结束后才访问测试集"]
     R2 --> TEST
     R3 --> TEST
-    TEST --> NONE["No Skill"]
-    TEST --> SEED["Seed Skill"]
-    TEST --> EVOLVED["Evolved Skill"]
-    NONE --> STATS["Paired Statistics<br/>Bootstrap CI / sign-flip p-value"]
+    TEST --> NONE["不使用 Skill"]
+    TEST --> SEED["使用初始 Skill"]
+    TEST --> EVOLVED["使用演化后 Skill"]
+    NONE --> STATS["成对统计<br/>Bootstrap 置信区间<br/>sign-flip p 值"]
     SEED --> STATS
     EVOLVED --> STATS
-    STATS --> REPORT["summary.json + report.md"]
+    STATS --> REPORT["JSON 汇总与 Markdown 报告"]
 
     classDef snapshot fill:#E3F2FD,stroke:#1976D2,color:#0D47A1
     classDef run fill:#F3E5F5,stroke:#7B1FA2,color:#4A148C
@@ -96,13 +118,24 @@ flowchart LR
     class NONE,SEED,EVOLVED,STATS,REPORT result
 ```
 
-三个角色也不再共享同一文件视图：Executor 只有 `submit_result`；Maintainer 只能收到
-抽样后的 Train Trace；Proposer 虽可读文件，但工作目录只包含 Wiki、当前 Skill 和本轮
-Train Trace，不存在 Validation/Test 文件。
+重复运行不会被错误地当成更多独立样本：系统先对同一 Test task 的重复结果取均值，再按唯一
+task ID 执行成对 Bootstrap。p 值由零效应假设下的 paired sign-flip randomization test
+计算；少于 10 个唯一 Test task 时，报告不会标记为“统计显著提升”。
 
-## 快速体验
+## 角色隔离
 
-需要 Python 3.10 及以上版本。
+三个模型角色不会共享同一文件视图：
+
+- 任务执行器只能提交答案，无法读取工作区文件，也看不到评分标签。
+- 知识维护者只接收抽样后的 Train 轨迹，不接触 Validation 或 Test 数据。
+- Skill 提案器只能访问当轮生成的最小视图，其中仅包含 Wiki、当前 Skill、影响记录和
+  本轮 Train 轨迹。
+
+评分、候选接受和版本发布始终由外层确定性代码完成。
+
+## 快速开始
+
+需要 Python 3.10 或更高版本。
 
 ```bash
 git clone https://github.com/still0123/skill-learning-engine.git
@@ -112,33 +145,42 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-先运行不访问模型的确定性 Demo，验证整个演化链路：
+### 运行离线演示
+
+下面的命令不会访问模型 API，也不会产生费用：
 
 ```bash
 skill-learning demo --workspace ./demo-workspace
 ```
 
-示例会从一个“原样返回输入”的 Skill 出发，根据大小写和空格导致的失败轨迹生成
-Pattern，把“转为小写并去除首尾空格”作为候选修改，并在 Validation 分数从 0 提升到
-1 后发布为 v1。该结果只证明编排和门禁逻辑有效，不代表真实模型实验效果。
+演示从“原样返回输入”的 Skill 出发，根据大小写和首尾空格导致的失败轨迹生成知识，提出
+“转为小写并去除首尾空格”的候选修改，并在 Validation 分数由 0 提升到 1 后发布为 v1。
 
-也可以离线验证完整的“三条件 + 重复运行 + Bootstrap + 报告”实验层：
+该结果只用于验证编排、门禁与版本管理是否正常，不代表真实模型效果。
+
+### 运行完整离线实验流程
 
 ```bash
 make experiment-demo
 ```
 
-生成的报告会明确标注为 Demo Runtime，不会伪装成真实模型实验。
+该命令会生成三条件对照、多次重复运行、统计结果和 Markdown 报告。报告会明确标注为
+确定性 Demo Runtime，不会伪装成真实模型实验。
+
+实验目录默认不可覆盖。`experiments/normalization-demo` 已存在时，请保留并重命名旧目录，
+或者直接使用 `skill-learning experiment --output <new-directory> ...` 指定新的输出位置。
 
 ## 使用真实模型
 
-先准备初始 Skill 和包含 `train`、`validation`、`test` 三种 split 的 JSONL 任务集：
+### 1. 准备任务集
+
+任务文件采用 JSONL 格式，必须同时包含 `train`、`validation`、`test` 三种数据划分：
 
 ```json
 {"id":"train-001","split":"train","input":" HELLO ","expected":"hello","metadata":{}}
 ```
 
-初始化工作区：
+### 2. 初始化工作区
 
 ```bash
 skill-learning init \
@@ -147,20 +189,21 @@ skill-learning init \
   --skill-file ./examples/normalization/skills/normalize/SKILL.md
 ```
 
-复制模型配置并执行演化：
+### 3. 配置模型并执行演化
 
 ```bash
 cp .env.example .env
+
 skill-learning run \
   --workspace ./workspace \
   --tasks ./examples/normalization/tasks.jsonl \
   --iterations 3
 ```
 
-真实模型调用沿用 AgentLoop 的配置，支持 GLM、DeepSeek、Qwen、Claude 和 OpenAI
-兼容端点。代码不会在仓库中保存 API Key。
+模型配置由 AgentLoop 提供，支持 GLM、DeepSeek、Qwen、Claude 和 OpenAI 兼容接口。
+API Key 只通过环境变量读取，不会写入仓库或实验清单。
 
-需要生成可用于比较的完整实验报告时，使用独立的 `experiment` 命令：
+### 4. 生成完整实验报告
 
 ```bash
 export AGENTLOOP_MODEL=<your-model>
@@ -178,34 +221,57 @@ skill-learning experiment \
   --bootstrap-samples 1000
 ```
 
-仓库内的 [Record Operations Benchmark](examples/record_ops/README.md) 含 28 条独立的
-结构化数据变换任务，覆盖筛选、排序、投影、去重、聚合、缺失值、类型保持和操作顺序。
-它只使用合成 JSON 数据，与 Pipeline Doctor、内部系统或个人飞书数据完全解耦。
+真实实验会产生模型 API 费用，因此程序不会自动猜测模型，也不会自行发起付费调用。
 
-真实实验会产生模型 API 费用，因此项目不会自行猜测模型或自动发起付费调用。
+## 示例数据集
+
+仓库内置的 [结构化记录操作基准](examples/record_ops/README.md) 包含 28 条相互独立的
+合成任务：
+
+| 数据划分 | 数量 | 用途 |
+|---|---:|---|
+| `train` | 10 | 产生执行轨迹并沉淀知识 |
+| `validation` | 6 | 判断候选 Skill 能否晋级 |
+| `test` | 12 | 演化结束后的最终对照评测 |
+
+任务覆盖筛选、多字段排序、字段投影、去重、聚合、缺失值处理、类型保持和操作顺序。
+该数据集仅使用合成 JSON 数据，与 Pipeline Doctor、内部系统和个人飞书数据完全解耦。
 
 ## 工作区产物
 
 ```text
 workspace/
-├── state.json                         # 当前迭代、版本和最佳验证分数
-├── raw/iteration-000/                 # 不可变任务轨迹
+├── state.json                         # 当前迭代、版本与最佳验证分数
+├── raw/iteration-000/                 # 不可变执行轨迹
 │   ├── validation-baseline/
 │   ├── train/
 │   ├── validation-candidate/
 │   └── test-final/
 ├── wiki/
-│   ├── index.md                       # Pattern 索引
+│   ├── index.md                       # 知识模式索引
 │   ├── patterns/                      # 可复用经验
 │   ├── logs.md                        # 演化日志
-│   └── skill-impact.md                # 候选收益和接受/拒绝原因
+│   └── skill-impact.md                # 候选收益与接受/拒绝原因
 ├── events/
 │   ├── evaluations.jsonl              # 逐次评测与逐任务成绩
-│   ├── patterns.jsonl                 # Pattern 历史快照
-│   └── skill-impact.jsonl             # Proposal、Diff 与成对门禁结果
+│   ├── patterns.jsonl                 # 知识模式历史
+│   └── skill-impact.jsonl             # 提案、差异与门禁结果
 ├── skills/<name>/                     # 当前正式 Skill
-├── candidates/iteration-000/<name>/   # 隔离候选版本
-└── versions/<name>/v000/              # 发布前快照
+├── candidates/iteration-000/<name>/   # 隔离的候选版本
+└── versions/<name>/v000/              # 发布前版本快照
+```
+
+完整实验还会额外生成：
+
+```text
+experiments/<experiment-id>/
+├── manifest.json                      # 运行配置与输入哈希
+├── inputs/                            # 数据、初始 Skill 与 Prompt 快照
+├── repeat-001/                        # 第一次独立演化
+├── repeat-002/                        # 第二次独立演化
+├── repeat-003/                        # 第三次独立演化
+├── summary.json                       # 机器可读汇总
+└── report.md                          # 人类可读实验报告
 ```
 
 ## 代码结构
@@ -213,13 +279,13 @@ workspace/
 ```text
 skill_learning/
 ├── agentloop_runtime.py   # AgentLoop 最小权限适配器
-├── components.py          # Executor、Maintainer、Proposer
-├── evolution.py           # 外层演化状态机
-├── experiment.py          # Manifest、重复运行、三条件基线与报告
+├── components.py          # 任务执行器、知识维护者与 Skill 提案器
+├── evolution.py           # Skill 演化状态机
+├── experiment.py          # 实验清单、重复运行、三条件对照与报告
 ├── gate.py                # 确定性验证门禁
-├── statistics.py          # 成对 Bootstrap 统计
-├── workspace.py           # Raw/Wiki/Skills、候选和版本管理
-├── tasks.py               # 任务适配与评分接口
+├── statistics.py          # Bootstrap 置信区间与 sign-flip 检验
+├── workspace.py           # 轨迹、知识库、候选与版本管理
+├── tasks.py               # 任务适配和评分接口
 └── schema.py              # 结构化输出校验
 ```
 
@@ -229,16 +295,30 @@ skill_learning/
 python -m unittest discover -s tests -v
 ```
 
-测试不访问网络，覆盖结构化提交契约、角色工具隔离、标签防泄漏、JSON 语义评分、
-成对门禁、Bootstrap 可复现性、三条件实验报告、候选晋级、旧版本快照，以及候选被
-拒绝后正式 Skill 不变但 Wiki 经验仍然保留。
+测试完全离线，覆盖以下内容：
+
+- 结构化提交与严格 Schema 校验。
+- 角色工具隔离和评分标签防泄漏。
+- JSON 语义评分和多指标评分契约。
+- 成对 Validation 门禁与任务错位拒绝。
+- Bootstrap 可复现性与 sign-flip p 值。
+- 三条件实验、Prompt 快照和 Runtime 漂移检测。
+- 候选晋级、旧版本快照，以及候选被拒绝后正式 Skill 保持不变。
+- wheel 构建、包内资源加载和安装后 Demo。
 
 ## 当前边界
 
-当前版本只支持单 Skill、串行离线演化和精确文本替换；尚未实现多 Skill 依赖调度、
-向量检索、Wiki 自动剪枝、在线修改或模型训练，也不宣称完整复现论文中的五个
-Benchmark、其他 Skill 演化 Baseline 或跨模型迁移实验。
+当前版本只支持单 Skill、串行离线演化和精确文本替换，尚未实现：
 
-## License
+- 多 Skill 依赖和协同演化。
+- 向量检索与 Wiki 自动剪枝。
+- 在线自动修改生产环境。
+- 模型微调、强化学习或其他参数训练。
+- 论文全部 Benchmark、Baseline 和跨模型迁移矩阵。
+
+仓库目前提供的是可验证的工程框架。没有运行真实模型实验时，不应把确定性 Demo 的结果
+表述为模型能力提升。
+
+## 许可证
 
 [MIT](LICENSE)

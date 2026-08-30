@@ -1,23 +1,28 @@
-# Record Operations Benchmark
+# 结构化记录操作基准
 
-This is a small, self-contained benchmark for learning and evaluating a general structured-data transformation Skill. It is deliberately unrelated to pipeline diagnosis or any operational domain.
+这是一个用于学习和评测通用结构化数据转换 Skill 的小型独立基准。它只使用合成 JSON
+数据，与流水线诊断、生产系统和其他业务领域无关。
 
-`tasks.jsonl` contains 28 JSONL tasks:
+`tasks.jsonl` 共包含 28 条任务：
 
-| Split | Count | Role |
-| --- | ---: | --- |
-| `train` | 10 | Generates execution traces and persistent patterns |
-| `validation` | 6 | Chooses whether a candidate Skill may be promoted |
-| `test` | 12 | Final held-out evaluation only |
+| 数据划分 | 数量 | 用途 |
+|---|---:|---|
+| `train` | 10 | 产生执行轨迹并沉淀持久知识 |
+| `validation` | 6 | 判断候选 Skill 能否晋级 |
+| `test` | 12 | 只用于演化结束后的最终对照评测 |
 
-Each task has four fields:
+每条任务包含以下字段：
 
-- `id`: unique task identifier.
-- `split`: `train`, `validation`, or `test`.
-- `input`: a JSON-encoded request with `records` and an ordered `operations` list.
-- `expected`: the ground-truth JSON value, retained as a JSON array or object rather than a natural-language answer.
-- `metadata.category`: the primary capability under test.
+- `id`：全局唯一的任务标识。
+- `split`：数据划分，取值为 `train`、`validation` 或 `test`。
+- `input`：JSON 编码的任务请求，包含 `records` 和按顺序执行的 `operations`。
+- `expected`：标准 JSON 结果，以数组或对象保存，而不是自然语言答案。
+- `metadata.category`：该任务主要覆盖的能力类别。
 
-The benchmark covers filtering, multi-key sorting, projection, first/last de-duplication, sum/average/count aggregation, missing-value filling, JSON type preservation, and order-sensitive operation chains. Records and operation combinations are distinct across splits.
+任务覆盖筛选、多字段排序、字段投影、保留首条或末条记录的去重、求和/平均值/计数聚合、
+缺失值填充、JSON 类型保持，以及对操作顺序敏感的组合流程。三个数据划分使用不同的记录
+内容和操作组合。
 
-The seed Skill at `skills/record-ops/SKILL.md` supplies the execution contract but intentionally does not include task answers. A learner should produce exactly one valid JSON value and use validation improvement, not training performance alone, to decide whether to publish an evolved Skill.
+初始 Skill 位于 `skills/record-ops/SKILL.md`。它只描述基本执行契约，不包含任何具体任务
+答案。学习系统必须输出一个合法 JSON 值，并根据 Validation 是否提升决定是否发布候选
+Skill，不能仅凭 Train 表现晋级。
