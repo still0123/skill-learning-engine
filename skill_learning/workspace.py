@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .models import Pattern, SkillProposal, Trace
+from .models import Evaluation, Pattern, SkillProposal, Trace
 
 
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -63,6 +63,8 @@ class Workspace:
             self.root / "skills" / skill_name,
             self.root / "candidates",
             self.root / "versions" / skill_name,
+            self.root / "events",
+            self.root / ".views" / "proposer",
         ):
             path.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.root / "skills" / skill_name / "SKILL.md", skill_text.rstrip() + "\n")
@@ -78,11 +80,16 @@ class Workspace:
             "| Iteration | Skill | Decision | Baseline | Candidate | Summary | Reason |\n"
             "|---:|---|---|---:|---:|---|---|\n",
         )
+        _atomic_write(self.root / "events" / "evaluations.jsonl", "")
+        _atomic_write(self.root / "events" / "patterns.jsonl", "")
+        _atomic_write(self.root / "events" / "skill-impact.jsonl", "")
         self.save_state({
             "skill_name": skill_name,
             "version": 0,
             "iteration": 0,
             "best_validation_score": None,
+            "best_validation_iteration": None,
+            "best_validation_phase": None,
         })
 
     def load_state(self) -> dict[str, Any]:
@@ -121,6 +128,51 @@ class Workspace:
             except FileExistsError as exc:
                 raise FileExistsError(f"immutable trace already exists: {path}") from exc
 
+    def record_evaluation(self, evaluation: Evaluation) -> None:
+        self.write_traces(evaluation.traces)
+        first = evaluation.traces[0]
+        event = {
+            "iteration": first.iteration,
+            "phase": evaluation.phase,
+            "split": evaluation.split,
+            "skill_name": first.skill_name,
+            "skill_version": first.skill_version,
+            "skill_sha256": first.skill_sha256,
+            "model_id": first.model_id,
+            "mean_score": evaluation.mean_score,
+            "metrics": evaluation.metrics,
+            "usage": evaluation.usage,
+            "duration_ms": sum(trace.duration_ms for trace in evaluation.traces),
+            "tasks": [
+                {
+                    "task_id": trace.task_id,
+                    "trace_id": trace.id,
+                    "score": trace.score,
+                    "metrics": trace.metrics,
+                    "passed": trace.passed,
+                }
+                for trace in evaluation.traces
+            ],
+        }
+        self._append_event("evaluations.jsonl", event)
+
+    def load_evaluation(self, *, iteration: int, phase: str) -> Evaluation:
+        trace_dir = self.root / "raw" / f"iteration-{iteration:03d}" / _component(phase, "phase")
+        paths = sorted(trace_dir.glob("*.json"))
+        if not paths:
+            raise FileNotFoundError(f"evaluation traces not found: {trace_dir}")
+        traces = [
+            Trace.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            for path in paths
+        ]
+        mean_score = sum(trace.score for trace in traces) / len(traces)
+        return Evaluation(
+            split=traces[0].split,
+            phase=phase,
+            mean_score=mean_score,
+            traces=traces,
+        )
+
     def update_patterns(self, *, iteration: int, patterns: list[Pattern]) -> None:
         pattern_dir = self.root / "wiki" / "patterns"
         for pattern in patterns:
@@ -145,6 +197,13 @@ class Workspace:
             f"\n## Iteration {iteration}\n\nUpdated patterns: "
             + (", ".join(f"`{pattern.id}`" for pattern in patterns) if patterns else "none")
             + ".\n"
+        )
+        self._append_event(
+            "patterns.jsonl",
+            {
+                "iteration": iteration,
+                "patterns": [pattern.to_dict() for pattern in patterns],
+            },
         )
 
     def append_log(self, text: str) -> None:
@@ -178,6 +237,25 @@ class Workspace:
         _atomic_write(purpose_path, purpose)
         return target
 
+    def prepare_proposer_view(
+        self,
+        *,
+        iteration: int,
+        skill_name: str,
+        traces: list[Trace],
+    ) -> Path:
+        target = self.root / ".views" / "proposer" / f"iteration-{iteration:03d}"
+        if target.exists():
+            raise FileExistsError(f"proposer view already exists: {target}")
+        (target / "traces").mkdir(parents=True)
+        shutil.copytree(self.root / "wiki", target / "wiki")
+        shutil.copytree(self.skill_dir(skill_name), target / "skill")
+        for trace in traces:
+            if trace.split != "train" or trace.phase != "train":
+                raise ValueError("proposer view accepts only current Train traces")
+            _atomic_write(target / "traces" / f"{_component(trace.task_id, 'task id')}.json", _json(trace.to_dict()))
+        return target
+
     def promote(self, *, candidate_dir: Path, skill_name: str, current_version: int) -> int:
         active = self.skill_dir(skill_name)
         snapshot = self.root / "versions" / skill_name / f"v{current_version:03d}"
@@ -201,6 +279,11 @@ class Workspace:
         candidate: float | None,
         summary: str,
         reason: str,
+        proposal: SkillProposal | None = None,
+        diff: str = "",
+        version_before: int | None = None,
+        version_after: int | None = None,
+        comparison: dict[str, Any] | None = None,
     ) -> None:
         def clean(value: str) -> str:
             return value.replace("|", "\\|").replace("\n", " ").strip()
@@ -213,3 +296,25 @@ class Workspace:
         )
         with (self.root / "wiki" / "skill-impact.md").open("a", encoding="utf-8") as handle:
             handle.write(row)
+        self._append_event(
+            "skill-impact.jsonl",
+            {
+                "iteration": iteration,
+                "skill_name": skill_name,
+                "decision": decision,
+                "baseline": baseline,
+                "candidate": candidate,
+                "summary": summary,
+                "reason": reason,
+                "proposal": proposal.to_dict() if proposal else None,
+                "diff": diff,
+                "version_before": version_before,
+                "version_after": version_after,
+                "comparison": comparison or {},
+            },
+        )
+
+    def _append_event(self, name: str, event: dict[str, Any]) -> None:
+        path = self.root / "events" / _component(name, "event file")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")

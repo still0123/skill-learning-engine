@@ -12,5 +12,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - run: python -m pip install build
+      - run: python -m build --wheel
+      - run: python -m venv /tmp/skill-learning-wheel-test
+      - run: /tmp/skill-learning-wheel-test/bin/pip install --no-deps dist/*.whl
+      - run: cd /tmp && /tmp/skill-learning-wheel-test/bin/python -c "from skill_learning.components import load_prompt; assert load_prompt('executor.md').strip()"
+      - run: cd /tmp && /tmp/skill-learning-wheel-test/bin/skill-learning --help
+      - run: cd /tmp && /tmp/skill-learning-wheel-test/bin/skill-learning demo --workspace /tmp/skill-learning-wheel-demo
       - run: python -m pip install -e ".[dev]"
       - run: python -m unittest discover -s tests -v

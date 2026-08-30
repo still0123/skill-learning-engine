@@ -52,6 +52,12 @@ class EvolutionTests(unittest.TestCase):
             self.assertEqual(summary.final_version, 1)
             self.assertIn("lowercase, trimmed", workspace.read_skill("normalize"))
             self.assertTrue((Path(temp) / "versions" / "normalize" / "v000" / "SKILL.md").is_file())
+            proposer_view = Path(temp) / ".views" / "proposer" / "iteration-000"
+            visible_paths = {path.relative_to(proposer_view).as_posix() for path in proposer_view.rglob("*")}
+            self.assertIn("traces/train-001.json", visible_paths)
+            self.assertFalse(any("validation" in path or "test" in path for path in visible_paths))
+            impacts = (Path(temp) / "events" / "skill-impact.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"diff": "--- skills/normalize/SKILL.md', impacts)
 
     def test_rejected_candidate_does_not_change_active_skill_but_keeps_wiki(self):
         with tempfile.TemporaryDirectory() as temp:

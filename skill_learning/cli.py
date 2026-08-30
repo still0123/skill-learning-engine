@@ -4,13 +4,15 @@ import argparse
 import json
 import os
 import sys
+from importlib import resources
 from pathlib import Path
 
 from .agentloop_runtime import AgentLoopRuntime
 from .evolution import EvolutionEngine
+from .experiment import ExperimentConfig, ExperimentRunner
 from .gate import EvaluationGate
 from .runtime import DemoRuntime
-from .tasks import ExactMatchJSONLAdapter
+from .tasks import build_adapter
 from .workspace import Workspace
 
 
@@ -49,8 +51,31 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run real-model evolution through AgentLoop")
     run.add_argument("--workspace", required=True, type=Path)
     run.add_argument("--tasks", required=True, type=Path)
+    run.add_argument("--adapter", choices=("exact", "json"), default="exact")
     run.add_argument("--iterations", type=int, default=1)
     run.add_argument("--epsilon", type=float, default=0.0)
+    run.add_argument("--min-improved-tasks", type=int, default=1)
+    run.add_argument("--max-regressed-tasks", type=int)
+
+    experiment = sub.add_parser(
+        "experiment",
+        help="run repeated real-model evolution with three Test baselines and a report",
+    )
+    experiment.add_argument("--output", required=True, type=Path)
+    experiment.add_argument("--experiment-id")
+    experiment.add_argument("--tasks", required=True, type=Path)
+    experiment.add_argument("--adapter", choices=("exact", "json"), required=True)
+    experiment.add_argument("--skill-name", required=True)
+    experiment.add_argument("--skill-file", required=True, type=Path)
+    experiment.add_argument("--iterations", type=int, default=3)
+    experiment.add_argument("--repeats", type=int, default=3)
+    experiment.add_argument("--epsilon", type=float, default=0.0)
+    experiment.add_argument("--min-improved-tasks", type=int, default=1)
+    experiment.add_argument("--max-regressed-tasks", type=int)
+    experiment.add_argument("--bootstrap-samples", type=int, default=1_000)
+    experiment.add_argument("--bootstrap-seed", "--seed", dest="bootstrap_seed", type=int, default=0)
+    experiment.add_argument("--max-turns", type=int, default=20)
+    experiment.add_argument("--runtime", choices=("agentloop", "demo"), default="agentloop")
 
     demo = sub.add_parser("demo", help="run deterministic local orchestration demo")
     demo.add_argument("--workspace", required=True, type=Path)
@@ -60,12 +85,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def _run_engine(args: argparse.Namespace, runtime) -> dict:
     workspace = Workspace(args.workspace)
-    adapter = ExactMatchJSONLAdapter(args.tasks)
+    adapter = build_adapter(getattr(args, "adapter", "exact"), args.tasks)
     engine = EvolutionEngine(
         workspace=workspace,
         runtime=runtime,
         adapter=adapter,
-        gate=EvaluationGate(getattr(args, "epsilon", 0.0)),
+        gate=EvaluationGate(
+            getattr(args, "epsilon", 0.0),
+            min_improved_tasks=getattr(args, "min_improved_tasks", 1),
+            max_regressed_tasks=getattr(args, "max_regressed_tasks", None),
+        ),
     )
     return engine.run(iterations=args.iterations).to_dict()
 
@@ -90,8 +119,54 @@ def main(argv: list[str] | None = None) -> int:
             workspace = Workspace(args.workspace)
             if not workspace.state_path.exists():
                 workspace.initialize(skill_name="normalize", skill_text=DEFAULT_SKILL)
-            args.tasks = Path(__file__).resolve().parents[1] / "examples" / "normalization" / "tasks.jsonl"
-            summary = _run_engine(args, DemoRuntime())
+            demo_resource = resources.files("skill_learning").joinpath(
+                "data", "normalization-tasks.jsonl"
+            )
+            with resources.as_file(demo_resource) as demo_tasks:
+                args.tasks = demo_tasks
+                args.adapter = "exact"
+                summary = _run_engine(args, DemoRuntime())
+        elif args.command == "experiment":
+            if args.runtime == "demo":
+                runtime_factory = DemoRuntime
+            else:
+                _load_dotenv()
+                try:
+                    from agentloop.models import build_client
+                except ImportError as exc:
+                    raise RuntimeError("AgentLoop dependency is not installed") from exc
+                runtime_factory = lambda: AgentLoopRuntime(
+                    build_client(),
+                    max_turns=args.max_turns,
+                )
+            config = ExperimentConfig(
+                experiment_id=args.experiment_id or args.output.name,
+                dataset_path=args.tasks,
+                adapter_name=args.adapter,
+                skill_name=args.skill_name,
+                skill_path=args.skill_file,
+                iterations=args.iterations,
+                repeats=args.repeats,
+                epsilon=args.epsilon,
+                min_improved_tasks=args.min_improved_tasks,
+                max_regressed_tasks=args.max_regressed_tasks,
+                bootstrap_samples=args.bootstrap_samples,
+                bootstrap_seed=args.bootstrap_seed,
+            )
+            experiment_summary = ExperimentRunner(
+                output_dir=args.output,
+                config=config,
+                runtime_factory=runtime_factory,
+            ).run()
+            summary = {
+                "experiment_id": experiment_summary["experiment_id"],
+                "report": str((args.output / "report.md").resolve()),
+                "conditions": {
+                    name: values["mean_score"]
+                    for name, values in experiment_summary["conditions"].items()
+                },
+                "paired_statistics": experiment_summary["paired_statistics"],
+            }
         else:
             _load_dotenv()
             try:

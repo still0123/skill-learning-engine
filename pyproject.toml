@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skill-learning-engine"
-version = "0.1.0"
-description = "Experience-driven skill learning with persistent knowledge, evaluation gates, and rollback."
+version = "0.2.0"
+description = "Reproducible experience-driven Skill evolution with persistent knowledge and evaluation gates."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

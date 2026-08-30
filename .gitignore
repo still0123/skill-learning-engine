@@ -13,3 +13,4 @@ htmlcov/
 # Generated evolution workspaces
 /workspace/
 /demo-workspace/
+/experiments/
